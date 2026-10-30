@@ -1,0 +1,51 @@
+# MiniDash — AI-Assisted Software Engineering Reflection
+
+## My Experience Using AI
+
+For this project, I used OpenAI Codex to build MiniDash, a food delivery API using FastAPI and SQLite. I chose Track C, Live Order Tracking, which involved creating an order status system, tracking order history, calculating delivery estimates, and building a polling client and driver simulation.
+
+The biggest benefit of using Codex was definitely how fast it could generate code. Something that would normally take me a lot longer to write myself could be generated in a fraction of the time. And it wasn't just writing code either. It was also generating automated tests for each feature, which made the whole development process a lot faster.
+
+Another thing I liked was how it helped me understand the architecture. Instead of just looking at individual functions, I could see how the API routes, business logic, and database all worked together. We broke the project into six different implementations, tested each one, and committed them separately. By the end, I had 159 passing tests and was able to run the entire order tracking system successfully.
+
+## The Biggest Challenges
+
+The biggest downside was that I still had to verify everything myself. Just because Codex generated something and said it worked didn't necessarily mean I could take its word for it.
+
+There were multiple times when Codex reported that it couldn't run the tests because of problems with its Python environment. But when I ran those same tests on my own computer, everything passed. So I had to make sure I was actually testing the code instead of just trusting whatever the AI told me.
+
+We also ran into an issue with the database. The original application used lowercase order statuses, but the new tracking system required uppercase statuses and a different order lifecycle. We could've implemented a database migration, but since this was just a development database, I decided it made more sense to reset it.
+
+That was one of the bigger lessons for me. AI can generate a solution, but that doesn't mean it's necessarily the best solution for what you're trying to accomplish. You still have to understand the problem and make those decisions yourself.
+
+## What This Taught Me About Software Engineering
+
+One thing this project really reinforced for me is that I think **system design has become the most important skill in software engineering**, especially now that AI can generate so much code.
+
+Think about it. If an AI can write functions, create endpoints, build database operations, and generate tests in seconds, then actually typing out the code isn't necessarily the hardest part anymore.
+
+The hard part is knowing what you're trying to build, how everything should work together, and whether the implementation actually makes sense.
+
+That's something I noticed throughout this project. We had the order lifecycle, the database, the tracking endpoint, the ETA calculations, and the polling client. Codex could generate each of those components, but somebody still had to make sure they all worked together as one system.
+
+And that's where I think software engineering is heading. Being able to write code is obviously still important, but understanding architecture, making good design decisions, and knowing how to verify what AI produces are becoming even more valuable.
+
+## What I Would Do Differently
+
+If I were starting this project again, I would probably spend more time planning the architecture before having Codex generate anything.
+
+We got everything working, but there were some decisions we had to revisit along the way, like how we wanted to handle the database schema and how to break up the implementation.
+
+I think if I had a more detailed picture of the entire system from the beginning, the process would've been even smoother.
+
+I'd also make sure the testing environment was completely set up before starting, just so there wouldn't be any confusion about whether the code was actually passing its tests.
+
+## Would I Use AI Again?
+
+Absolutely. I think using AI is one of the fastest ways to ship code right now.
+
+Obviously, you still have to review what it generates. You can't just blindly trust that everything is correct. But even when you factor in the time it takes to review the code, run tests, and fix issues, it's still significantly faster than doing everything manually.
+
+I don't think AI removes the need for software engineers. If anything, I think it puts more emphasis on the skills that actually matter, like understanding systems, solving problems, and making good decisions.
+
+That's probably my biggest takeaway from this entire project. AI makes writing code easier, but knowing **what to build, how to build it, and whether it actually works** is still on the engineer.
