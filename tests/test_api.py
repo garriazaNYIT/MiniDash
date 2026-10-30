@@ -14,7 +14,10 @@ from app.schemas import OrderInput
 
 @pytest.fixture
 def api(tmp_path):
-    app = create_app(tmp_path / 'test.db')
+    return make_api(create_app(tmp_path / 'test.db'))
+
+
+def make_api(app):
 
     def request(method, path, body=None):
         async def run():
@@ -219,3 +222,65 @@ def test_history_write_failure_rolls_back_entire_operation(tmp_path, monkeypatch
             assert db.execute('SELECT COUNT(*) FROM order_items').fetchone()[0] == 0
         else:
             assert repo.order(db, 1)['status'] == 'PLACED'
+
+
+def test_tracking_initial_order(api):
+    _, order = api('POST', '/orders', order_payload())
+    assert api('GET', '/orders/1/tracking') == (200, {
+        'order_id': 1,
+        'status': 'PLACED',
+        'history': [{'status': 'PLACED', 'changed_at': order['created_at']}],
+    })
+
+
+def test_tracking_missing_and_invalid_order(api):
+    assert api('GET', '/orders/999/tracking') == (404, {'detail': 'Order not found'})
+    assert api('GET', '/orders/not-an-id/tracking')[0] == 422
+
+
+def test_tracking_ordered_history_and_persistence(api, tmp_path):
+    api('POST', '/orders', order_payload())
+    api('POST', '/orders', order_payload())
+    statuses = ['PLACED', 'PREPARING', 'READY', 'PICKED_UP', 'DELIVERED']
+    for status in statuses[1:]:
+        assert api('PATCH', '/orders/1/status', {'status': status})[0] == 200
+    code, tracking = api('GET', '/orders/1/tracking')
+    assert code == 200
+    assert set(tracking) == {'order_id', 'status', 'history'}
+    assert tracking['status'] == 'DELIVERED'
+    assert [event['status'] for event in tracking['history']] == statuses
+    times = [datetime.fromisoformat(event['changed_at']) for event in tracking['history']]
+    assert times == sorted(times)
+    assert all(value.utcoffset() == timedelta(0) for value in times)
+    assert tracking['history'] == history_at(tmp_path / 'test.db')
+    restarted_api = make_api(create_app(tmp_path / 'test.db'))
+    assert restarted_api('GET', '/orders/1/tracking') == (200, tracking)
+    assert [event['status'] for event in restarted_api('GET', '/orders/2/tracking')[1]['history']] == ['PLACED']
+
+
+def test_tracking_stable_order_for_equal_timestamps(api, tmp_path):
+    api('POST', '/orders', order_payload())
+    api('PATCH', '/orders/1/status', {'status': 'PREPARING'})
+    api('PATCH', '/orders/1/status', {'status': 'READY'})
+    with Repository(tmp_path / 'test.db').connect() as db:
+        db.execute("UPDATE order_status_history SET changed_at = '2026-10-30T12:00:00+00:00'")
+    tracking = api('GET', '/orders/1/tracking')[1]
+    assert [event['status'] for event in tracking['history']] == ['PLACED', 'PREPARING', 'READY']
+    assert all(event['changed_at'] == '2026-10-30T12:00:00+00:00' for event in tracking['history'])
+
+
+@pytest.mark.parametrize('terminal', ['DELIVERED', 'CANCELLED'])
+def test_tracking_is_read_only(api, tmp_path, terminal):
+    api('POST', '/orders', order_payload())
+    sequence = ['PREPARING', 'READY', 'PICKED_UP', 'DELIVERED'] if terminal == 'DELIVERED' else ['CANCELLED']
+    for status in sequence:
+        api('PATCH', '/orders/1/status', {'status': status})
+    repo = Repository(tmp_path / 'test.db')
+    with repo.connect() as db:
+        before = list(db.iterdump())
+    first = api('GET', '/orders/1/tracking')
+    for _ in range(3):
+        assert api('GET', '/orders/1/tracking') == first
+    assert first[1]['status'] == terminal
+    with repo.connect() as db:
+        assert list(db.iterdump()) == before

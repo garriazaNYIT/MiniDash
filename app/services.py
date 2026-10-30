@@ -42,6 +42,20 @@ class OrderService:
                 raise HTTPException(404, 'Order not found')
             return order
 
+    def tracking(self, order_id):
+        repo = self.repository
+        with repo.connect() as db:
+            # Keep the order and history reads in the same SQLite snapshot.
+            db.execute('BEGIN')
+            order = repo.order(db, order_id)
+            if order is None:
+                raise HTTPException(404, 'Order not found')
+            return {
+                'order_id': order['id'],
+                'status': order['status'],
+                'history': repo.status_history(db, order_id),
+            }
+
     def change_status(self, order_id, status):
         repo = self.repository
         with repo.connect() as db:

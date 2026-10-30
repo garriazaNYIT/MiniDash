@@ -32,3 +32,8 @@ def get_order(id: int, request: Request):
 @router.patch('/orders/{id}/status')
 def update_status(id: int, payload: StatusInput, request: Request):
     return OrderService(request.app.state.repository).change_status(id, payload.status)
+
+
+@router.get('/orders/{id}/tracking')
+def tracking(id: int, request: Request):
+    return OrderService(request.app.state.repository).tracking(id)
