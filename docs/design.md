@@ -1,5 +1,13 @@
 # Track C design
 
+## Slice 4 ETA behavior
+
+Order creation now requires a finite nonnegative numeric `delivery_distance_km`. Travel minutes are `ceil(distance_km * 2)` at 30 km/h. PLACED/PREPARING use `max(0, avg_prep_minutes - elapsed_minutes_since_creation)`; the preparation clock does not restart at PREPARING. The current restaurant preparation value is read during recalculation. READY/PICKED_UP use travel time only. DELIVERED stores the actual transition timestamp as `estimated_delivery_at`; CANCELLED clears that value. `eta_updated_at` records each actual status change, including cancellation. Repeated requests preserve both fields.
+
+Status, history, and ETA writes share one transaction. Tracking derives nonnegative, rounded-up `remaining_minutes` from the stored estimate without writing; delivered returns zero and cancelled returns null. Distances whose estimates exceed Python's supported datetime range return 422 at creation. Pre-ETA schemas are rejected without conversion; migration and legacy-distance policy remain unresolved. No polling or simulation is implemented.
+
+Verification: The full test suite was successfully executed locally with 118 passed, 1 warning.
+
 ## Architecture
 
 Preserve FastAPI routes -> services -> repository -> SQLite. The service owns transaction orchestration, lifecycle validation, and ETA calculation. A pure lifecycle policy module supplies the approved status vocabulary and transition classification without importing FastAPI or touching storage. Routes retain request/response and HTTP concerns; repositories retain SQL concerns.

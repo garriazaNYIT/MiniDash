@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 
 from .order_tracking import is_status_change
+from .eta import estimate_delivery, remaining_minutes
 
 class OrderService:
     def __init__(self, repository):
@@ -16,7 +17,8 @@ class OrderService:
         repo = self.repository
         with repo.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            if not repo.restaurant(db, payload.restaurant_id):
+            restaurant = repo.restaurant(db, payload.restaurant_id)
+            if not restaurant:
                 raise HTTPException(404, 'Restaurant not found')
             items = []
             seen = set()
@@ -31,8 +33,15 @@ class OrderService:
             total = sum(quantity * price for _, quantity, price in items)
             if total > 9223372036854775807:
                 raise HTTPException(422, 'Order total exceeds supported range')
+            now = datetime.now(timezone.utc)
+            try:
+                estimate = estimate_delivery('PLACED', now.isoformat(),
+                                             restaurant['avg_prep_minutes'], payload.delivery_distance_km, now)
+            except OverflowError:
+                raise HTTPException(422, 'Delivery estimate exceeds supported date range') from None
             order_id = repo.insert_order(db, payload.restaurant_id, total, address,
-                                         datetime.now(timezone.utc).isoformat(), items)
+                                         now.isoformat(), items, payload.delivery_distance_km)
+            repo.update_eta(db, order_id, estimate, now.isoformat())
             return repo.order(db, order_id)
 
     def get(self, order_id):
@@ -54,6 +63,10 @@ class OrderService:
                 'order_id': order['id'],
                 'status': order['status'],
                 'history': repo.status_history(db, order_id),
+                'estimated_delivery_at': order['estimated_delivery_at'],
+                'eta_updated_at': order['eta_updated_at'],
+                'remaining_minutes': 0 if order['status'] == 'DELIVERED' else remaining_minutes(
+                    order['estimated_delivery_at'], datetime.now(timezone.utc)),
             }
 
     def change_status(self, order_id, status):
@@ -69,7 +82,11 @@ class OrderService:
                 raise HTTPException(409, 'Invalid status transition') from None
             if not changed:
                 return order
+            now = datetime.now(timezone.utc)
+            restaurant = repo.restaurant(db, order['restaurant_id'])
+            estimate = estimate_delivery(status, order['created_at'], restaurant['avg_prep_minutes'],
+                                         order['delivery_distance_km'], now)
             repo.update_status(db, order_id, status)
-            repo.append_status_history(db, order_id, status,
-                                       datetime.now(timezone.utc).isoformat())
+            repo.append_status_history(db, order_id, status, now.isoformat())
+            repo.update_eta(db, order_id, estimate, now.isoformat())
             return repo.order(db, order_id)

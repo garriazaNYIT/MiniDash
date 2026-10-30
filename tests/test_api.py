@@ -2,7 +2,7 @@
 import asyncio
 import json
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -55,7 +55,7 @@ def make_api(app):
 
 
 def order_payload(**changes):
-    return {'restaurant_id': 1, 'address': '123 Main Street',
+    return {'restaurant_id': 1, 'address': '123 Main Street', 'delivery_distance_km': 6,
             'items': [{'menu_item_id': 1, 'quantity': 2},
                       {'menu_item_id': 2, 'quantity': 1}], **changes}
 
@@ -230,7 +230,79 @@ def test_tracking_initial_order(api):
         'order_id': 1,
         'status': 'PLACED',
         'history': [{'status': 'PLACED', 'changed_at': order['created_at']}],
+        'estimated_delivery_at': order['estimated_delivery_at'],
+        'eta_updated_at': order['eta_updated_at'],
+        'remaining_minutes': 32,
     })
+
+
+@pytest.mark.parametrize('distance', [-1, 'far', True, None, 1e300])
+def test_invalid_distance_does_not_create_order(api, distance):
+    assert api('POST', '/orders', order_payload(delivery_distance_km=distance))[0] == 422
+    assert api('GET', '/orders/1')[0] == 404
+
+
+def test_distance_required(api):
+    payload = order_payload()
+    del payload['delivery_distance_km']
+    assert api('POST', '/orders', payload)[0] == 422
+
+
+@pytest.mark.parametrize('distance', [float('nan'), float('inf'), float('-inf')])
+def test_nonfinite_distances_rejected(distance):
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        OrderInput(**order_payload(delivery_distance_km=distance))
+
+
+def test_eta_write_failure_rolls_back_status_and_history(api, tmp_path, monkeypatch):
+    api('POST', '/orders', order_payload())
+    before = api('GET', '/orders/1')
+    history = history_at(tmp_path / 'test.db')
+
+    def fail(*args):
+        raise sqlite3.IntegrityError('ETA write failed')
+
+    monkeypatch.setattr(Repository, 'update_eta', staticmethod(fail))
+    with pytest.raises(sqlite3.IntegrityError, match='ETA write failed'):
+        api('PATCH', '/orders/1/status', {'status': 'PREPARING'})
+    assert api('GET', '/orders/1') == before
+    assert history_at(tmp_path / 'test.db') == history
+
+
+def test_eta_status_changes_noops_and_persistence(api, tmp_path, monkeypatch):
+    import app.services as services
+
+    class Clock(datetime):
+        current = datetime(2026, 10, 30, 12, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    monkeypatch.setattr(services, 'datetime', Clock)
+    _, order = api('POST', '/orders', order_payload())
+    assert order['estimated_delivery_at'] == '2026-10-30T12:32:00+00:00'
+    for status, minute, expected in [('PREPARING', 5, 32), ('READY', 10, 22),
+                                     ('PICKED_UP', 15, 27), ('DELIVERED', 25, 25)]:
+        Clock.current = Clock.current.replace(minute=minute)
+        code, order = api('PATCH', '/orders/1/status', {'status': status})
+        assert code == 200
+        assert order['estimated_delivery_at'] == Clock.current.replace(minute=expected).isoformat()
+        assert order['eta_updated_at'] == Clock.current.isoformat()
+        Clock.current += timedelta(seconds=10)
+        assert api('PATCH', '/orders/1/status', {'status': status}) == (200, order)
+        assert api('PATCH', '/orders/1/status', {'status': 'PLACED'})[0] == 409
+        assert api('GET', '/orders/1')[1] == order
+    restarted = make_api(create_app(tmp_path / 'test.db'))
+    tracking = restarted('GET', '/orders/1/tracking')[1]
+    assert tracking['estimated_delivery_at'] == order['estimated_delivery_at']
+    assert tracking['eta_updated_at'] == order['eta_updated_at']
+    assert tracking['remaining_minutes'] == 0
+    api('POST', '/orders', order_payload(delivery_distance_km=0))
+    cancelled = api('PATCH', '/orders/2/status', {'status': 'CANCELLED'})[1]
+    assert cancelled['estimated_delivery_at'] is None
+    assert api('GET', '/orders/2/tracking')[1]['remaining_minutes'] is None
 
 
 def test_tracking_missing_and_invalid_order(api):
@@ -246,7 +318,7 @@ def test_tracking_ordered_history_and_persistence(api, tmp_path):
         assert api('PATCH', '/orders/1/status', {'status': status})[0] == 200
     code, tracking = api('GET', '/orders/1/tracking')
     assert code == 200
-    assert set(tracking) == {'order_id', 'status', 'history'}
+    assert set(tracking) == {'order_id', 'status', 'history', 'estimated_delivery_at', 'eta_updated_at', 'remaining_minutes'}
     assert tracking['status'] == 'DELIVERED'
     assert [event['status'] for event in tracking['history']] == statuses
     times = [datetime.fromisoformat(event['changed_at']) for event in tracking['history']]

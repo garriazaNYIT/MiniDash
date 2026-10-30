@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS orders (
     status TEXT NOT NULL CHECK(status IN
         ('PLACED', 'PREPARING', 'READY', 'PICKED_UP', 'DELIVERED', 'CANCELLED')),
     total_cents INTEGER NOT NULL CHECK(total_cents >= 0),
-    address TEXT NOT NULL, created_at TEXT NOT NULL
+    address TEXT NOT NULL, created_at TEXT NOT NULL,
+    delivery_distance_km REAL NOT NULL CHECK(delivery_distance_km >= 0),
+    estimated_delivery_at TEXT, eta_updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS order_items (
     id INTEGER PRIMARY KEY,
@@ -65,6 +67,8 @@ class Repository:
                     'Legacy order schema requires an approved migration. '
                     'Use MINIDASH_DB with a new database path for Track C.'
                 )
+            if existing and 'delivery_distance_km' not in existing['sql']:
+                raise RuntimeError('Pre-ETA schema requires an approved migration; use a new MINIDASH_DB path.')
             db.executescript(SCHEMA)
             restaurants = [
                 (1, 'Pizza Corner', 'Italian', '11:00', '22:00', 20),
@@ -102,10 +106,12 @@ class Repository:
         return db.execute('SELECT * FROM menu_items WHERE id = ?', (item_id,)).fetchone()
 
     @staticmethod
-    def insert_order(db, restaurant_id, total, address, created_at, items):
+    def insert_order(db, restaurant_id, total, address, created_at, items,
+                     delivery_distance_km=0):
         cursor = db.execute(
-            'INSERT INTO orders (restaurant_id, status, total_cents, address, created_at) '
-            "VALUES (?, 'PLACED', ?, ?, ?)", (restaurant_id, total, address, created_at))
+            'INSERT INTO orders (restaurant_id, status, total_cents, address, created_at, delivery_distance_km) '
+            "VALUES (?, 'PLACED', ?, ?, ?, ?)",
+            (restaurant_id, total, address, created_at, delivery_distance_km))
         order_id = cursor.lastrowid
         db.executemany(
             'INSERT INTO order_items (order_id, menu_item_id, quantity, unit_price_cents) '
@@ -139,3 +145,8 @@ class Repository:
     @staticmethod
     def update_status(db, order_id, status):
         db.execute('UPDATE orders SET status = ? WHERE id = ?', (status, order_id))
+
+    @staticmethod
+    def update_eta(db, order_id, estimated_delivery_at, eta_updated_at):
+        db.execute('UPDATE orders SET estimated_delivery_at = ?, eta_updated_at = ? WHERE id = ?',
+                   (estimated_delivery_at, eta_updated_at, order_id))
