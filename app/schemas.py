@@ -1,9 +1,8 @@
-from typing import Literal
-
 from pydantic import BaseModel, Field
 
+from .order_tracking import OrderStatus
 
-Status = Literal['pending', 'preparing', 'out_for_delivery', 'delivered', 'cancelled']
+Status = OrderStatus
 
 
 class OrderItemInput(BaseModel):

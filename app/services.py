@@ -3,16 +3,9 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
+from .order_tracking import is_status_change
 
 class OrderService:
-    TRANSITIONS = {
-        'pending': {'preparing', 'cancelled'},
-        'preparing': {'out_for_delivery', 'cancelled'},
-        'out_for_delivery': {'delivered'},
-        'delivered': set(),
-        'cancelled': set(),
-    }
-
     def __init__(self, repository):
         self.repository = repository
 
@@ -56,7 +49,13 @@ class OrderService:
             order = repo.order(db, order_id)
             if order is None:
                 raise HTTPException(404, 'Order not found')
-            if status != order['status'] and status not in self.TRANSITIONS[order['status']]:
-                raise HTTPException(409, 'Invalid status transition')
+            try:
+                changed = is_status_change(order['status'], status)
+            except ValueError:
+                raise HTTPException(409, 'Invalid status transition') from None
+            if not changed:
+                return order
             repo.update_status(db, order_id, status)
+            repo.append_status_history(db, order_id, status,
+                                       datetime.now(timezone.utc).isoformat())
             return repo.order(db, order_id)

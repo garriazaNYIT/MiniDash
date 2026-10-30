@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS orders (
     id INTEGER PRIMARY KEY,
     restaurant_id INTEGER NOT NULL REFERENCES restaurants(id),
     status TEXT NOT NULL CHECK(status IN
-        ('pending', 'preparing', 'out_for_delivery', 'delivered', 'cancelled')),
+        ('PLACED', 'PREPARING', 'READY', 'PICKED_UP', 'DELIVERED', 'CANCELLED')),
     total_cents INTEGER NOT NULL CHECK(total_cents >= 0),
     address TEXT NOT NULL, created_at TEXT NOT NULL
 );
@@ -29,6 +29,14 @@ CREATE TABLE IF NOT EXISTS order_items (
     quantity INTEGER NOT NULL CHECK(quantity > 0),
     unit_price_cents INTEGER NOT NULL CHECK(unit_price_cents >= 0)
 );
+CREATE TABLE IF NOT EXISTS order_status_history (
+    id INTEGER PRIMARY KEY,
+    order_id INTEGER NOT NULL REFERENCES orders(id),
+    status TEXT NOT NULL CHECK(status IN
+        ('PLACED', 'PREPARING', 'READY', 'PICKED_UP', 'DELIVERED', 'CANCELLED')),
+    changed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS history_by_order ON order_status_history(order_id, id);
 """
 
 
@@ -49,6 +57,14 @@ class Repository:
 
     def initialize(self):
         with self.connect() as db:
+            existing = db.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'orders'"
+            ).fetchone()
+            if existing and "'pending'" in existing['sql']:
+                raise RuntimeError(
+                    'Legacy order schema requires an approved migration. '
+                    'Use MINIDASH_DB with a new database path for Track C.'
+                )
             db.executescript(SCHEMA)
             restaurants = [
                 (1, 'Pizza Corner', 'Italian', '11:00', '22:00', 20),
@@ -89,12 +105,25 @@ class Repository:
     def insert_order(db, restaurant_id, total, address, created_at, items):
         cursor = db.execute(
             'INSERT INTO orders (restaurant_id, status, total_cents, address, created_at) '
-            "VALUES (?, 'pending', ?, ?, ?)", (restaurant_id, total, address, created_at))
+            "VALUES (?, 'PLACED', ?, ?, ?)", (restaurant_id, total, address, created_at))
         order_id = cursor.lastrowid
         db.executemany(
             'INSERT INTO order_items (order_id, menu_item_id, quantity, unit_price_cents) '
             'VALUES (?, ?, ?, ?)', [(order_id, *item) for item in items])
+        Repository.append_status_history(db, order_id, 'PLACED', created_at)
         return order_id
+
+    @staticmethod
+    def append_status_history(db, order_id, status, changed_at):
+        db.execute(
+            'INSERT INTO order_status_history (order_id, status, changed_at) VALUES (?, ?, ?)',
+            (order_id, status, changed_at))
+
+    @staticmethod
+    def status_history(db, order_id):
+        return [dict(row) for row in db.execute(
+            'SELECT status, changed_at FROM order_status_history WHERE order_id = ? ORDER BY id',
+            (order_id,))]
 
     @staticmethod
     def order(db, order_id):

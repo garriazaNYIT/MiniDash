@@ -1,5 +1,15 @@
 # Track C implementation slices
 
+## Current iteration: Persistent Order Status History
+
+The latest user request names this work Slice 2 and explicitly includes lifecycle integration and persistent history (rows 2 and 3 of the original plan below). That explicit scope supersedes the previous iteration authorization text. Implemented uppercase schema/input validation, shared lifecycle policy integration, and atomic UTC history writes. No tracking endpoint, ETA, polling, or simulation is implemented.
+
+Legacy schemas are rejected before initialization writes anything, with an actionable error directing users to a new `MINIDASH_DB` path. Existing data is not migrated or backfilled; D1 remains unresolved. Existing order response fields are unchanged; history is available through the repository for later tracking work. Events are ordered by insertion ID, preserving transition order even for equal timestamps.
+
+Verification: created a local `.venv` and installed the existing pytest dependency. Installing the existing requirements failed because MSYS Python 3.14 cannot build `pydantic-core` on its platform. The full suite was attempted and failed during collection with missing `fastapi`; API tests therefore remain unverified. Lifecycle and repository suites passed: **63 passed**, with one existing iterator-parametrization deprecation warning. SQLite tests verify restart persistence, tied-timestamp ordering, transaction rollback, and non-destructive legacy-schema rejection. API tests were added for lifecycle history, repeated/invalid requests, UTC timestamps, order isolation, and injected history-write failures, but cannot execute in this environment until FastAPI is available. No dependency declarations changed and no commit or push was made.
+
+## Original slice plan and previous iteration record
+
 Only slice 1 is authorized for implementation in this iteration. Each later slice requires its own proposed-change explanation, tests, and relevant regression checks. Resolve the cited approval items before dependent work; add no dependencies without approval.
 
 | Slice | Deliverable and boundary | Independent verification | Prerequisites | State |

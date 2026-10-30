@@ -1,10 +1,15 @@
 """Exercise the real ASGI app using only the standard library and pytest."""
 import asyncio
 import json
+import sqlite3
+from datetime import datetime, timedelta
 
 import pytest
 
 from app.main import create_app
+from app.repository import Repository
+from app.services import OrderService
+from app.schemas import OrderInput
 
 
 @pytest.fixture
@@ -73,7 +78,7 @@ def test_create_and_get_order(api):
     status, order = api('POST', '/orders', order_payload())
     assert status == 201
     assert order['total_cents'] == 2900
-    assert order['status'] == 'pending'
+    assert order['status'] == 'PLACED'
     assert order['created_at'].endswith('+00:00')
     assert order['items'][0] == {'menu_item_id': 1, 'quantity': 2, 'unit_price_cents': 1200}
     assert api('GET', f"/orders/{order['id']}") == (200, order)
@@ -101,24 +106,116 @@ def test_invalid_order_does_not_persist(api, changes, expected):
 def test_status_lifecycle(api):
     _, order = api('POST', '/orders', order_payload())
     path = f"/orders/{order['id']}/status"
-    assert api('PATCH', path, {'status': 'delivered'})[0] == 409
+    assert api('PATCH', path, {'status': 'DELIVERED'})[0] == 409
     assert api('PATCH', path, {'status': 'unknown'})[0] == 422
-    for status in ['pending', 'preparing', 'out_for_delivery', 'delivered']:
+    for status in ['PLACED', 'PREPARING', 'READY', 'PICKED_UP', 'DELIVERED']:
         code, updated = api('PATCH', path, {'status': status})
         assert code == 200
         assert updated['status'] == status
-    assert api('PATCH', path, {'status': 'cancelled'})[0] == 409
-    assert api('GET', f"/orders/{order['id']}")[1]['status'] == 'delivered'
-    assert api('PATCH', '/orders/999/status', {'status': 'preparing'})[0] == 404
+    assert api('PATCH', path, {'status': 'CANCELLED'})[0] == 409
+    assert api('GET', f"/orders/{order['id']}")[1]['status'] == 'DELIVERED'
+    assert api('PATCH', '/orders/999/status', {'status': 'PREPARING'})[0] == 404
 
 
 def test_cancellation(api):
     api('POST', '/orders', order_payload())
-    assert api('PATCH', '/orders/1/status', {'status': 'cancelled'})[1]['status'] == 'cancelled'
-    assert api('PATCH', '/orders/1/status', {'status': 'preparing'})[0] == 409
+    assert api('PATCH', '/orders/1/status', {'status': 'CANCELLED'})[1]['status'] == 'CANCELLED'
+    assert api('PATCH', '/orders/1/status', {'status': 'PREPARING'})[0] == 409
 
 
 def test_required_fields_and_invalid_path(api):
     assert api('POST', '/orders', {})[0] == 422
     assert api('GET', '/orders/not-an-id')[0] == 422
     assert api('GET', '/restaurants/not-an-id/menu')[0] == 422
+
+
+def history_at(path, order_id=1):
+    repo = Repository(path)
+    with repo.connect() as db:
+        return repo.status_history(db, order_id)
+
+
+def test_history_lifecycle_noops_and_restart(api, tmp_path):
+    _, order = api('POST', '/orders', order_payload())
+    path = tmp_path / 'test.db'
+    initial = history_at(path)
+    assert initial == [{'status': 'PLACED', 'changed_at': order['created_at']}]
+    statuses = ['PLACED', 'PREPARING', 'READY', 'PICKED_UP', 'DELIVERED']
+    for index, status in enumerate(statuses):
+        assert api('PATCH', '/orders/1/status', {'status': status})[0] == 200
+        before = history_at(path)
+        assert [event['status'] for event in before] == statuses[:index + 1]
+        for _ in range(2):
+            assert api('PATCH', '/orders/1/status', {'status': status})[0] == 200
+        assert history_at(path) == before
+    times = [datetime.fromisoformat(event['changed_at']) for event in before]
+    assert all(value.utcoffset() == timedelta(0) for value in times)
+    assert times == sorted(times)
+    restarted = create_app(path)
+    repo = restarted.state.repository
+    repo.initialize()
+    repo.initialize()
+    with repo.connect() as db:
+        assert repo.status_history(db, 1) == before
+        assert repo.order(db, 1)['status'] == 'DELIVERED'
+
+
+@pytest.mark.parametrize('current', ['PLACED', 'PREPARING', 'READY', 'PICKED_UP', 'DELIVERED', 'CANCELLED'])
+def test_history_invalid_transitions_and_order_isolation(api, tmp_path, current):
+    api('POST', '/orders', order_payload())
+    api('POST', '/orders', order_payload())
+    sequence = ['PREPARING', 'READY', 'PICKED_UP', 'DELIVERED']
+    if current == 'CANCELLED':
+        sequence = ['CANCELLED']
+    elif current == 'PLACED':
+        sequence = []
+    else:
+        sequence = sequence[:sequence.index(current) + 1]
+    for status in sequence:
+        assert api('PATCH', '/orders/1/status', {'status': status})[0] == 200
+    before_order = api('GET', '/orders/1')
+    before_history = history_at(tmp_path / 'test.db')
+    valid_next = {'PLACED': {'PREPARING', 'CANCELLED'}, 'PREPARING': {'READY'},
+                  'READY': {'PICKED_UP'}, 'PICKED_UP': {'DELIVERED'}}
+    for target in ['PLACED', 'PREPARING', 'READY', 'PICKED_UP', 'DELIVERED', 'CANCELLED']:
+        if target == current:
+            assert api('PATCH', '/orders/1/status', {'status': target})[0] == 200
+        elif target not in valid_next.get(current, set()):
+            assert api('PATCH', '/orders/1/status', {'status': target})[0] == 409
+        else:
+            continue
+        assert api('GET', '/orders/1') == before_order
+        assert history_at(tmp_path / 'test.db') == before_history
+    for target in ['pending', 'UNKNOWN']:
+        assert api('PATCH', '/orders/1/status', {'status': target})[0] == 422
+    assert api('PATCH', '/orders/999/status', {'status': 'PREPARING'})[0] == 404
+    assert history_at(tmp_path / 'test.db') == before_history
+    assert [event['status'] for event in history_at(tmp_path / 'test.db', 2)] == ['PLACED']
+
+
+@pytest.mark.parametrize('operation', ['create', 'transition'])
+def test_history_write_failure_rolls_back_entire_operation(tmp_path, monkeypatch, operation):
+    repo = Repository(tmp_path / 'atomic.db')
+    repo.initialize()
+    service = OrderService(repo)
+    payload = OrderInput(**order_payload())
+    if operation == 'transition':
+        service.create(payload)
+    before = history_at(repo.path)
+
+    def fail_history(*args):
+        raise sqlite3.IntegrityError('simulated history failure')
+
+    monkeypatch.setattr(Repository, 'append_status_history', staticmethod(fail_history))
+    with pytest.raises(sqlite3.IntegrityError, match='simulated history failure'):
+        if operation == 'create':
+            service.create(payload)
+        else:
+            service.change_status(1, 'PREPARING')
+    assert history_at(repo.path) == before
+    with repo.connect() as db:
+        if operation == 'create':
+            assert repo.order(db, 1) is None
+            assert db.execute('SELECT COUNT(*) FROM order_items').fetchone()[0] == 0
+        else:
+            assert repo.order(db, 1)['status'] == 'PLACED'
